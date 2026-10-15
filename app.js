@@ -5,7 +5,8 @@ const $ = s => document.querySelector(s);
 const OMDB_KEY_BUILT = '__OMDB_KEY__';
 const OMDB_KEY = OMDB_KEY_BUILT.startsWith('__') ? '' : OMDB_KEY_BUILT;
 
-const K = { state: 'mr.state.v1', posters: 'mr.posters.v1', filters: 'mr.filters.v1', google: 'mr.google.v1' };
+const K = { state: 'mr.state.v1', posters: 'mr.posters.v1', filters: 'mr.filters.v1' };
+try { localStorage.removeItem('mr.google.v1'); } catch {} // Google Sheets sign-in from an older version
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } },
@@ -289,11 +290,15 @@ document.addEventListener('keydown', e => {
 });
 
 /* ---------- CSV export ---------- */
-// Letterboxd's importer wants quotes inside quoted text escaped with a backslash (see letterboxd.com/about/importing-data/)
-const csvCell = v => { v = v == null ? '' : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '\\"') + '"' : v; };
+// Letterboxd's importer wants quotes inside quoted text escaped with a backslash (see letterboxd.com/about/importing-data/);
+// spreadsheets (Google Sheets, Excel) want them doubled
+const csvCell = (v, standard) => {
+  v = v == null ? '' : String(v);
+  return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, standard ? '""' : '\\"') + '"' : v;
+};
 
-function download(name, rows) {
-  const blob = new Blob(['﻿' + rows.map(r => r.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+function download(name, rows, style) {
+  const blob = new Blob(['﻿' + rows.map(r => r.map(v => csvCell(v, style === 'standard')).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
@@ -408,154 +413,117 @@ const drop = $('#drop');
 ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => e.dataTransfer.files[0] && loadZip(e.dataTransfer.files[0]));
 
-/* ---------- Google sync: a spreadsheet in your own Google Drive ----------
-   Sign-in is Google Identity Services' token flow (no server). Scope drive.file = only files this app created. */
-// OAuth client ID from Google Cloud Console → APIs & Services → Credentials. Public by design, not a secret.
-const GOOGLE_CLIENT_ID = '817788103336-tma2k74ikqhg0uqmo33jasbof8lliaf6.apps.googleusercontent.com';
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
-const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets/';
-const TAB_FILMS = 'Фильмы', TAB_EXCL = 'Исключено';
-const HEADER = ['imdbID', 'Название', 'Год', 'Решение', 'Оценка', 'Когда решено (UTC)', 'Когда скачано (UTC)'];
-const ACTION_RU = { seen: 'смотрел', skip: 'не буду', wl: 'watchlist', none: 'отменено' };
-const ACTION_KEY = Object.fromEntries(Object.entries(ACTION_RU).map(([k, v]) => [v, k]));
+/* ---------- sync via Firebase: sign in with Google once per device ----------
+   Firebase Auth keeps the session in the browser and refreshes it by itself, so there's no hourly re-login.
+   Memory lives in Firestore under users/{uid}/shards/* — the security rules let only that user read/write it. */
+// Firebase console → Project settings → Your apps → Web app → SDK setup and configuration. Public by design, not a secret.
+const FIREBASE_CONFIG = {
+  apiKey: 'AIzaSyCoB9zvkOJlcfJOIfaNtx6yUUVJYQImnoQ',
+  authDomain: 'movie-rater-511716.firebaseapp.com',
+  projectId: 'movie-rater-511716',
+  appId: '1:817788103336:web:dfea75f110a50e2683709d',
+};
+const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+const SHARDS = 16; // decisions are split by IMDb id so no document gets near Firestore's 1 MB limit
 
-let gacc = store.get(K.google, null); // { email, token, exp, sheetId }
+let fbAuth = null, fbMod = null, fbUser = null;
 let syncing = false, syncAgain = false, syncTimer = null;
 
-class NeedLogin extends Error {}
-
 function syncStatus(kind, text) {
-  $('#syncDot').className = kind === 'auth' ? 'err' : kind;
+  $('#syncDot').className = kind;
   $('#syncDot').title = text;
-  $('#syncMsg').className = 'msg' + (kind === 'err' || kind === 'auth' ? ' err' : kind === 'ok' ? ' ok' : '');
+  $('#syncMsg').className = 'msg' + (kind === 'err' ? ' err' : kind === 'ok' ? ' ok' : '');
   $('#syncMsg').textContent = text;
-  $('#reauth').classList.toggle('hidden', kind !== 'auth');
 }
 
-function gisReady() {
-  return new Promise((res, rej) => {
-    let n = 0;
-    const check = () => {
-      if (window.google?.accounts?.oauth2) return res();
-      if (++n > 100) return rej(new Error('не загрузился вход Google — проверь интернет или блокировщик рекламы'));
-      setTimeout(check, 100);
-    };
-    check();
+async function initFirebase() {
+  if (!FIREBASE_CONFIG) return;
+  const [{ initializeApp }, auth] = await Promise.all([import(FIREBASE_SDK + 'firebase-app.js'), import(FIREBASE_SDK + 'firebase-auth.js')]);
+  fbMod = auth;
+  fbAuth = auth.getAuth(initializeApp(FIREBASE_CONFIG));
+  // fires on start with the remembered user, and after sign-in / sign-out
+  auth.onAuthStateChanged(fbAuth, user => {
+    fbUser = user;
+    renderSyncBox();
+    if (user) sync(); else syncStatus('', 'Синхронизация не настроена');
   });
 }
 
-// Must run from a click: Google opens its sign-in popup (it closes by itself when you're already signed in).
-async function signIn() {
-  await gisReady();
-  const r = await new Promise((res, rej) => {
-    const client = google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: DRIVE_SCOPE + ' openid email',
-      callback: res,
-      error_callback: e => rej(new Error(
-        e.type === 'popup_closed' ? 'окно входа закрыли' :
-        e.type === 'popup_failed_to_open' ? 'браузер заблокировал окно входа — разреши всплывающие окна для этого сайта' : e.message || e.type)),
-    });
-    client.requestAccessToken(gacc?.email ? { prompt: '', login_hint: gacc.email } : { prompt: 'consent' });
-  });
-  if (r.error) throw new Error(r.error_description || r.error);
-  if (!google.accounts.oauth2.hasGrantedAllScopes(r, DRIVE_SCOPE))
-    throw new Error('не дан доступ к Google Drive — при входе оставь отмеченной галочку про файлы Google Drive');
-  const email = gacc?.email || (await (await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: 'Bearer ' + r.access_token } })).json()).email;
-  gacc = { ...(gacc || {}), email, token: r.access_token, exp: Date.now() + (r.expires_in - 60) * 1000 };
-  store.set(K.google, gacc);
+const AUTH_ERRORS = {
+  'auth/popup-blocked': 'браузер заблокировал окно входа — разреши всплывающие окна для этого сайта',
+  'auth/popup-closed-by-user': 'окно входа закрыли',
+  'auth/cancelled-popup-request': 'окно входа закрыли',
+  'auth/unauthorized-domain': 'этот адрес сайта не добавлен в Firebase (Authentication → Settings → Authorized domains)',
+  'auth/operation-not-allowed': 'в Firebase не включён вход через Google (Authentication → Sign-in method)',
+  'auth/network-request-failed': 'нет связи с Google',
+};
+
+async function connect() {
+  try {
+    syncStatus('busy', 'Вход через Google…');
+    const provider = new fbMod.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    await fbMod.signInWithPopup(fbAuth, provider); // onAuthStateChanged takes it from here
+  } catch (e) {
+    syncStatus('err', 'Не получилось войти: ' + (AUTH_ERRORS[e.code] || e.message));
+  }
 }
 
-async function gapi(url, opts = {}) {
-  if (!gacc?.token || Date.now() > gacc.exp) throw new NeedLogin();
-  const r = await fetch(url, { ...opts, headers: { Authorization: 'Bearer ' + gacc.token, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) } });
-  if (r.status === 401) { gacc.exp = 0; store.set(K.google, gacc); throw new NeedLogin(); }
+const docsPath = () => `projects/${FIREBASE_CONFIG.projectId}/databases/(default)/documents`;
+
+async function firestore(path, opts = {}) {
+  const token = await fbUser.getIdToken(); // refreshed by Firebase when needed
+  const r = await fetch('https://firestore.googleapis.com/v1/' + docsPath() + path, {
+    ...opts, headers: { Authorization: 'Bearer ' + token, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+  });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
-    throw Object.assign(new Error(j.error?.message || 'Google ответил ' + r.status), { status: r.status });
+    throw new Error(j.error?.status === 'PERMISSION_DENIED' ? 'нет доступа к базе — проверь правила Firestore'
+      : j.error?.status === 'NOT_FOUND' ? 'база Firestore не создана в проекте Firebase' : j.error?.message || 'Firestore ответил ' + r.status);
   }
   return r.json();
 }
 
-async function findOrCreateSheet() {
-  // drive.file only lists files this app created, so this finds the table made on another device too
-  const q = encodeURIComponent("appProperties has { key='movieRater' and value='1' } and trashed=false");
-  const list = await gapi(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime&fields=files(id)`);
-  if (list.files?.length) return list.files[0].id;
-  const f = await gapi('https://www.googleapis.com/drive/v3/files?fields=id', { method: 'POST', body: JSON.stringify({
-    name: 'Movie Rater', mimeType: 'application/vnd.google-apps.spreadsheet', appProperties: { movieRater: '1' } }) });
-  const meta = await gapi(SHEETS + f.id + '?fields=sheets.properties.sheetId');
-  await gapi(SHEETS + f.id + ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests: [
-    { updateSheetProperties: { properties: { sheetId: meta.sheets[0].properties.sheetId, title: TAB_FILMS, gridProperties: { frozenRowCount: 1 } },
-      fields: 'title,gridProperties.frozenRowCount' } },
-    { addSheet: { properties: { title: TAB_EXCL } } },
-  ] }) });
-  return f.id;
-}
-
-async function ensureTabs(id) {
-  const meta = await gapi(SHEETS + id + '?fields=sheets.properties.title');
-  const have = new Set(meta.sheets.map(s => s.properties.title));
-  const requests = [TAB_FILMS, TAB_EXCL].filter(t => !have.has(t)).map(title => ({ addSheet: { properties: { title } } }));
-  if (requests.length) await gapi(SHEETS + id + ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests }) });
-}
-
-const toCell = t => t ? new Date(t).toISOString().replace('T', ' ').replace('Z', '') : '';
-const fromCell = s => s ? Date.parse(String(s).replace(' ', 'T') + 'Z') || 0 : 0;
-const fromImdb = s => +String(s).replace(/^tt/, '') || 0;
-const a1 = (tab, cells) => `'${tab}'!${cells}`;
-
-async function readSheet(id) {
-  const ranges = [a1(TAB_FILMS, 'A2:G'), a1(TAB_EXCL, 'A1:B')].map(r => 'ranges=' + encodeURIComponent(r)).join('&');
-  const got = await gapi(`${SHEETS}${id}/values:batchGet?valueRenderOption=UNFORMATTED_VALUE&${ranges}`);
-  const [rows, excl] = got.valueRanges.map(v => v.values || []);
-  const remote = { decisions: {}, excluded: { ids: [], at: 0 } };
-  for (const [imdb, n, y, a, r, t, x] of rows) {
-    const id = fromImdb(imdb);
-    if (!id || !ACTION_KEY[a]) continue;
-    remote.decisions[id] = { a: ACTION_KEY[a], r: r === '' || r == null ? null : +String(r).replace(',', '.'),
-      n: String(n ?? ''), y: +y || 0, t: fromCell(t), x: fromCell(x) };
+async function readRemote() {
+  const res = await firestore(`/users/${fbUser.uid}/shards?pageSize=100`);
+  const remote = { decisions: {}, excluded: { ids: [], at: 0 } }, raw = {};
+  for (const d of res.documents || []) {
+    const name = d.name.split('/').pop(), text = d.fields?.data?.stringValue || '{}';
+    raw[name] = text;
+    const v = JSON.parse(text);
+    if (name === 'meta') remote.excluded = v.excluded || remote.excluded;
+    else Object.assign(remote.decisions, v);
   }
-  if (excl.length) remote.excluded = { at: fromCell(excl[0][1]), ids: excl.slice(1).map(r => fromImdb(r[0])).filter(Boolean) };
-  return remote;
+  return { remote, raw };
 }
 
-async function writeSheet(id) {
-  // newest first, so the table reads like a log
-  const rows = Object.entries(state.decisions).sort((p, q) => q[1].t - p[1].t)
-    .map(([fid, d]) => [imdbStr(+fid), d.n, d.y, ACTION_RU[d.a], d.r ?? '', toCell(d.t), toCell(d.x)]);
-  const excl = [['Исключено по экспорту Letterboxd, обновлено (UTC):', toCell(state.excluded.at)], ...state.excluded.ids.map(i => [imdbStr(i)])];
-  await gapi(`${SHEETS}${id}/values:batchClear`, { method: 'POST', body: JSON.stringify({ ranges: [a1(TAB_EXCL, 'A:B')] }) });
-  await gapi(`${SHEETS}${id}/values:batchUpdate`, { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data: [
-    { range: a1(TAB_FILMS, 'A1'), values: [HEADER, ...rows] },
-    { range: a1(TAB_EXCL, 'A1'), values: excl },
-  ] }) });
+function shardTexts(s) {
+  const shards = Array.from({ length: SHARDS }, () => ({}));
+  for (const [id, d] of Object.entries(s.decisions)) shards[id % SHARDS][id] = d;
+  const out = { meta: JSON.stringify({ excluded: s.excluded }) };
+  shards.forEach((sh, i) => out['d' + i] = JSON.stringify(sh));
+  return out;
 }
 
 async function sync() {
-  if (!gacc || !CAT) return;
+  if (!fbUser || !CAT) return;
   if (syncing) { syncAgain = true; return; }
   syncing = true;
   syncStatus('busy', 'Синхронизирую…');
   try {
-    if (!gacc.sheetId) { gacc.sheetId = await findOrCreateSheet(); store.set(K.google, gacc); renderGoogleBox(); }
-    let remote;
-    try { remote = await readSheet(gacc.sheetId); }
-    catch (e) {
-      if (e.status === 404) { gacc.sheetId = await findOrCreateSheet(); store.set(K.google, gacc); renderGoogleBox(); } // table deleted
-      else if (e.status === 400) await ensureTabs(gacc.sheetId); // a tab was renamed or deleted by hand
-      else throw e;
-      remote = await readSheet(gacc.sheetId);
-    }
+    const { remote, raw } = await readRemote();
     const before = JSON.stringify(state);
     state = merge(state, remote);
     saveState();
     if (JSON.stringify(state) !== before && !busy && !rateResolve) { rebuildQueue(); render(); }
-    await writeSheet(gacc.sheetId);
+    // write back only the documents that differ from what's stored
+    const writes = Object.entries(shardTexts(state))
+      .filter(([name, text]) => raw[name] !== text && !(raw[name] === undefined && text === '{}'))
+      .map(([name, text]) => ({ update: { name: `${docsPath()}/users/${fbUser.uid}/shards/${name}`, fields: { data: { stringValue: text } } } }));
+    if (writes.length) await firestore(':commit', { method: 'POST', body: JSON.stringify({ writes }) });
     syncStatus('ok', 'Синхронизировано ' + new Date().toLocaleTimeString().slice(0, 5));
   } catch (e) {
-    if (e instanceof NeedLogin) syncStatus('auth', 'Google просит войти снова, чтобы продолжить синхронизацию.');
-    else syncStatus('err', 'Синхронизация не удалась: ' + e.message);
+    syncStatus('err', 'Синхронизация не удалась: ' + e.message);
   } finally {
     syncing = false;
     if (syncAgain) { syncAgain = false; scheduleSync(0); }
@@ -563,41 +531,24 @@ async function sync() {
 }
 
 function scheduleSync(delay = 4000) {
-  if (!gacc) return;
+  if (!fbUser) return;
   clearTimeout(syncTimer);
   syncTimer = setTimeout(sync, delay);
 }
-document.addEventListener('visibilitychange', () => { if (gacc) sync(); }); // push when leaving, pull when coming back
+document.addEventListener('visibilitychange', () => { if (fbUser) sync(); }); // push when leaving, pull when coming back
 
-function renderGoogleBox() {
-  $('#gNoClient').classList.toggle('hidden', !!GOOGLE_CLIENT_ID);
-  $('#gOff').classList.toggle('hidden', !GOOGLE_CLIENT_ID || !!gacc);
-  $('#gOn').classList.toggle('hidden', !gacc);
-  if (!gacc) return;
-  $('#gEmail').textContent = gacc.email || '';
-  $('#gSheet').classList.toggle('hidden', !gacc.sheetId);
-  if (gacc.sheetId) $('#gSheet').href = 'https://docs.google.com/spreadsheets/d/' + gacc.sheetId + '/edit';
+function renderSyncBox() {
+  $('#gNoClient').classList.toggle('hidden', !!FIREBASE_CONFIG);
+  $('#gOff').classList.toggle('hidden', !FIREBASE_CONFIG || !!fbUser);
+  $('#gOn').classList.toggle('hidden', !fbUser);
+  if (fbUser) $('#gEmail').textContent = fbUser.email || fbUser.displayName || '';
 }
 
-async function connectGoogle() {
-  try {
-    syncStatus('busy', 'Вход через Google…');
-    await signIn();
-    renderGoogleBox();
-    await sync();
-  } catch (e) {
-    syncStatus(gacc ? 'auth' : 'err', 'Не получилось войти: ' + e.message);
-  }
-}
-$('#googleIn').onclick = connectGoogle;
-$('#reauthBtn').onclick = connectGoogle;
+$('#googleIn').onclick = connect;
 $('#syncNow').onclick = () => sync();
-$('#googleOut').onclick = () => {
-  if (!confirm('Отключить синхронизацию на этом устройстве? Память на устройстве и таблица в Google Drive останутся.')) return;
-  try { google.accounts.oauth2.revoke(gacc.token); } catch {}
-  gacc = null; store.del(K.google);
-  renderGoogleBox();
-  syncStatus('', 'Синхронизация не настроена');
+$('#googleOut').onclick = async () => {
+  if (!confirm('Выйти из аккаунта на этом устройстве? Память на устройстве и в облаке останется.')) return;
+  await fbMod.signOut(fbAuth);
 };
 
 /* ---------- backup ---------- */
@@ -625,13 +576,23 @@ $('#forgetSkips').onclick = () => {
   ids.forEach(id => state.decisions[id] = { ...state.decisions[id], a: 'none', t: now });
   saveState(); scheduleSync(0); rebuildQueue(); render(); fillSettings();
 };
+// the whole memory as an ordinary table — opens in Google Sheets (File → Import) or Excel
+$('#memoryCsv').onclick = () => {
+  const label = { seen: 'смотрел', skip: 'не буду', wl: 'watchlist' };
+  const when = t => t ? new Date(t).toISOString().slice(0, 16).replace('T', ' ') : '';
+  const rows = Object.entries(state.decisions).filter(([, d]) => label[d.a]).sort((p, q) => q[1].t - p[1].t)
+    .map(([id, d]) => [imdbStr(+id), d.n, d.y, label[d.a], d.r ?? '', when(d.t), d.x >= d.t ? when(d.x) : '']);
+  if (!rows.length) { alert('Память пока пустая.'); return; }
+  download('movie-rater-memory-' + new Date().toISOString().slice(0, 10) + '.csv',
+    [['imdbID', 'Название', 'Год', 'Решение', 'Оценка', 'Когда решено (UTC)', 'Скачано для Letterboxd (UTC)'], ...rows], 'standard');
+};
 
 /* ---------- settings & filters dialogs ---------- */
 function fillSettings() {
   const all = Object.values(state.decisions), c = a => all.filter(d => d.a === a).length;
   $('#memStats').textContent = `Оценено: ${c('seen')} · в watchlist: ${c('wl')} · «не буду»: ${c('skip')} · исключено по экспорту Letterboxd: ${state.excluded.ids.length}`;
   $('#catInfo').textContent = CAT ? `${films.length.toLocaleString('ru')} фильмов с ${CAT.minVotes.toLocaleString('ru')}+ оценками на IMDb, обновлён ${CAT.built}` : '…';
-  renderGoogleBox();
+  renderSyncBox();
 }
 $('#settingsBtn').onclick = () => { fillSettings(); $('#settings').classList.remove('hidden'); };
 $('#settingsDone').onclick = () => $('#settings').classList.add('hidden');
@@ -681,7 +642,6 @@ $('#undo').onclick = undo;
     $('#loading').textContent = 'Не получилось загрузить каталог: ' + e.message;
     return;
   }
-  if (gacc) syncStatus('', 'Синхронизация подключена');
   rebuildQueue(); render();
-  sync();
+  initFirebase().catch(e => syncStatus('err', 'Не загрузился вход через Google: ' + e.message));
 })();
