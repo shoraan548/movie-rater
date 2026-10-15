@@ -5,7 +5,7 @@ const $ = s => document.querySelector(s);
 const OMDB_KEY_BUILT = '__OMDB_KEY__';
 const OMDB_KEY = OMDB_KEY_BUILT.startsWith('__') ? '' : OMDB_KEY_BUILT;
 
-const K = { state: 'mr.state.v1', posters: 'mr.posters.v1', filters: 'mr.filters.v1', gist: 'mr.gist.v1' };
+const K = { state: 'mr.state.v1', posters: 'mr.posters.v1', filters: 'mr.filters.v1', google: 'mr.google.v1' };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } },
@@ -408,62 +408,154 @@ const drop = $('#drop');
 ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => e.dataTransfer.files[0] && loadZip(e.dataTransfer.files[0]));
 
-/* ---------- GitHub Gist sync ---------- */
-const GIST_FILE = 'movie-rater.json';
-let gist = store.get(K.gist, null); // { token, id }
+/* ---------- Google sync: a spreadsheet in your own Google Drive ----------
+   Sign-in is Google Identity Services' token flow (no server). Scope drive.file = only files this app created. */
+// OAuth client ID from Google Cloud Console → APIs & Services → Credentials. Public by design, not a secret.
+const GOOGLE_CLIENT_ID = '542740006083-12em0ij0t5bfg6b0so1lraqltdqipiev.apps.googleusercontent.com';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets/';
+const TAB_FILMS = 'Фильмы', TAB_EXCL = 'Исключено';
+const HEADER = ['imdbID', 'Название', 'Год', 'Решение', 'Оценка', 'Когда решено (UTC)', 'Когда скачано (UTC)'];
+const ACTION_RU = { seen: 'смотрел', skip: 'не буду', wl: 'watchlist', none: 'отменено' };
+const ACTION_KEY = Object.fromEntries(Object.entries(ACTION_RU).map(([k, v]) => [v, k]));
+
+let gacc = store.get(K.google, null); // { email, token, exp, sheetId }
 let syncing = false, syncAgain = false, syncTimer = null;
 
+class NeedLogin extends Error {}
+
 function syncStatus(kind, text) {
-  $('#syncDot').className = kind;
+  $('#syncDot').className = kind === 'auth' ? 'err' : kind;
   $('#syncDot').title = text;
-  $('#syncMsg').className = 'msg' + (kind === 'err' ? ' err' : kind === 'ok' ? ' ok' : '');
+  $('#syncMsg').className = 'msg' + (kind === 'err' || kind === 'auth' ? ' err' : kind === 'ok' ? ' ok' : '');
   $('#syncMsg').textContent = text;
+  $('#reauth').classList.toggle('hidden', kind !== 'auth');
 }
 
-async function gh(path, opts = {}) {
-  const r = await fetch('https://api.github.com' + path, {
-    ...opts,
-    headers: { Authorization: 'Bearer ' + gist.token, Accept: 'application/vnd.github+json', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+function gisReady() {
+  return new Promise((res, rej) => {
+    let n = 0;
+    const check = () => {
+      if (window.google?.accounts?.oauth2) return res();
+      if (++n > 100) return rej(new Error('не загрузился вход Google — проверь интернет или блокировщик рекламы'));
+      setTimeout(check, 100);
+    };
+    check();
   });
-  if (r.status === 401) throw new Error('токен не подходит (401) — проверь, что он скопирован целиком и не отозван');
-  if (r.status === 403 || r.status === 404) throw new Error(`нет доступа (${r.status}) — у токена должна быть галочка «gist»`);
-  if (!r.ok) throw new Error('GitHub ответил ' + r.status);
+}
+
+// Must run from a click: Google opens its sign-in popup (it closes by itself when you're already signed in).
+async function signIn() {
+  await gisReady();
+  const r = await new Promise((res, rej) => {
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: DRIVE_SCOPE + ' openid email',
+      callback: res,
+      error_callback: e => rej(new Error(
+        e.type === 'popup_closed' ? 'окно входа закрыли' :
+        e.type === 'popup_failed_to_open' ? 'браузер заблокировал окно входа — разреши всплывающие окна для этого сайта' : e.message || e.type)),
+    });
+    client.requestAccessToken(gacc?.email ? { prompt: '', login_hint: gacc.email } : { prompt: 'consent' });
+  });
+  if (r.error) throw new Error(r.error_description || r.error);
+  if (!google.accounts.oauth2.hasGrantedAllScopes(r, DRIVE_SCOPE))
+    throw new Error('не дан доступ к Google Drive — при входе оставь отмеченной галочку про файлы Google Drive');
+  const email = gacc?.email || (await (await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: 'Bearer ' + r.access_token } })).json()).email;
+  gacc = { ...(gacc || {}), email, token: r.access_token, exp: Date.now() + (r.expires_in - 60) * 1000 };
+  store.set(K.google, gacc);
+}
+
+async function gapi(url, opts = {}) {
+  if (!gacc?.token || Date.now() > gacc.exp) throw new NeedLogin();
+  const r = await fetch(url, { ...opts, headers: { Authorization: 'Bearer ' + gacc.token, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) } });
+  if (r.status === 401) { gacc.exp = 0; store.set(K.google, gacc); throw new NeedLogin(); }
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw Object.assign(new Error(j.error?.message || 'Google ответил ' + r.status), { status: r.status });
+  }
   return r.json();
 }
 
-async function findOrCreateGist() {
-  for (let page = 1; page <= 10; page++) {
-    const list = await gh(`/gists?per_page=100&page=${page}`);
-    const g = list.find(g => g.files && g.files[GIST_FILE]);
-    if (g) return g.id;
-    if (list.length < 100) break;
+async function findOrCreateSheet() {
+  // drive.file only lists files this app created, so this finds the table made on another device too
+  const q = encodeURIComponent("appProperties has { key='movieRater' and value='1' } and trashed=false");
+  const list = await gapi(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime&fields=files(id)`);
+  if (list.files?.length) return list.files[0].id;
+  const f = await gapi('https://www.googleapis.com/drive/v3/files?fields=id', { method: 'POST', body: JSON.stringify({
+    name: 'Movie Rater', mimeType: 'application/vnd.google-apps.spreadsheet', appProperties: { movieRater: '1' } }) });
+  const meta = await gapi(SHEETS + f.id + '?fields=sheets.properties.sheetId');
+  await gapi(SHEETS + f.id + ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests: [
+    { updateSheetProperties: { properties: { sheetId: meta.sheets[0].properties.sheetId, title: TAB_FILMS, gridProperties: { frozenRowCount: 1 } },
+      fields: 'title,gridProperties.frozenRowCount' } },
+    { addSheet: { properties: { title: TAB_EXCL } } },
+  ] }) });
+  return f.id;
+}
+
+async function ensureTabs(id) {
+  const meta = await gapi(SHEETS + id + '?fields=sheets.properties.title');
+  const have = new Set(meta.sheets.map(s => s.properties.title));
+  const requests = [TAB_FILMS, TAB_EXCL].filter(t => !have.has(t)).map(title => ({ addSheet: { properties: { title } } }));
+  if (requests.length) await gapi(SHEETS + id + ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests }) });
+}
+
+const toCell = t => t ? new Date(t).toISOString().replace('T', ' ').replace('Z', '') : '';
+const fromCell = s => s ? Date.parse(String(s).replace(' ', 'T') + 'Z') || 0 : 0;
+const fromImdb = s => +String(s).replace(/^tt/, '') || 0;
+const a1 = (tab, cells) => `'${tab}'!${cells}`;
+
+async function readSheet(id) {
+  const ranges = [a1(TAB_FILMS, 'A2:G'), a1(TAB_EXCL, 'A1:B')].map(r => 'ranges=' + encodeURIComponent(r)).join('&');
+  const got = await gapi(`${SHEETS}${id}/values:batchGet?valueRenderOption=UNFORMATTED_VALUE&${ranges}`);
+  const [rows, excl] = got.valueRanges.map(v => v.values || []);
+  const remote = { decisions: {}, excluded: { ids: [], at: 0 } };
+  for (const [imdb, n, y, a, r, t, x] of rows) {
+    const id = fromImdb(imdb);
+    if (!id || !ACTION_KEY[a]) continue;
+    remote.decisions[id] = { a: ACTION_KEY[a], r: r === '' || r == null ? null : +String(r).replace(',', '.'),
+      n: String(n ?? ''), y: +y || 0, t: fromCell(t), x: fromCell(x) };
   }
-  const g = await gh('/gists', { method: 'POST', body: JSON.stringify({
-    description: 'Movie Rater — память свайпов (служебный файл, не удаляй)', public: false,
-    files: { [GIST_FILE]: { content: JSON.stringify(state) } } }) });
-  return g.id;
+  if (excl.length) remote.excluded = { at: fromCell(excl[0][1]), ids: excl.slice(1).map(r => fromImdb(r[0])).filter(Boolean) };
+  return remote;
+}
+
+async function writeSheet(id) {
+  // newest first, so the table reads like a log
+  const rows = Object.entries(state.decisions).sort((p, q) => q[1].t - p[1].t)
+    .map(([fid, d]) => [imdbStr(+fid), d.n, d.y, ACTION_RU[d.a], d.r ?? '', toCell(d.t), toCell(d.x)]);
+  const excl = [['Исключено по экспорту Letterboxd, обновлено (UTC):', toCell(state.excluded.at)], ...state.excluded.ids.map(i => [imdbStr(i)])];
+  await gapi(`${SHEETS}${id}/values:batchClear`, { method: 'POST', body: JSON.stringify({ ranges: [a1(TAB_EXCL, 'A:B')] }) });
+  await gapi(`${SHEETS}${id}/values:batchUpdate`, { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data: [
+    { range: a1(TAB_FILMS, 'A1'), values: [HEADER, ...rows] },
+    { range: a1(TAB_EXCL, 'A1'), values: excl },
+  ] }) });
 }
 
 async function sync() {
-  if (!gist?.token || !CAT) return;
+  if (!gacc || !CAT) return;
   if (syncing) { syncAgain = true; return; }
   syncing = true;
   syncStatus('busy', 'Синхронизирую…');
   try {
-    if (!gist.id) { gist.id = await findOrCreateGist(); store.set(K.gist, gist); }
-    const g = await gh('/gists/' + gist.id);
-    const f = g.files[GIST_FILE];
-    if (f) {
-      const remote = JSON.parse(f.truncated ? await (await fetch(f.raw_url)).text() : f.content);
-      const before = JSON.stringify(state);
-      state = merge(state, remote);
-      saveState();
-      if (JSON.stringify(state) !== before && !busy && !rateResolve) { rebuildQueue(); render(); }
+    if (!gacc.sheetId) { gacc.sheetId = await findOrCreateSheet(); store.set(K.google, gacc); renderGoogleBox(); }
+    let remote;
+    try { remote = await readSheet(gacc.sheetId); }
+    catch (e) {
+      if (e.status === 404) { gacc.sheetId = await findOrCreateSheet(); store.set(K.google, gacc); renderGoogleBox(); } // table deleted
+      else if (e.status === 400) await ensureTabs(gacc.sheetId); // a tab was renamed or deleted by hand
+      else throw e;
+      remote = await readSheet(gacc.sheetId);
     }
-    await gh('/gists/' + gist.id, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(state) } } }) });
+    const before = JSON.stringify(state);
+    state = merge(state, remote);
+    saveState();
+    if (JSON.stringify(state) !== before && !busy && !rateResolve) { rebuildQueue(); render(); }
+    await writeSheet(gacc.sheetId);
     syncStatus('ok', 'Синхронизировано ' + new Date().toLocaleTimeString().slice(0, 5));
   } catch (e) {
-    syncStatus('err', 'Синхронизация не удалась: ' + e.message);
+    if (e instanceof NeedLogin) syncStatus('auth', 'Google просит войти снова, чтобы продолжить синхронизацию.');
+    else syncStatus('err', 'Синхронизация не удалась: ' + e.message);
   } finally {
     syncing = false;
     if (syncAgain) { syncAgain = false; scheduleSync(0); }
@@ -471,26 +563,42 @@ async function sync() {
 }
 
 function scheduleSync(delay = 4000) {
-  if (!gist?.token) return;
+  if (!gacc) return;
   clearTimeout(syncTimer);
   syncTimer = setTimeout(sync, delay);
 }
-document.addEventListener('visibilitychange', () => { if (gist?.token) sync(); }); // push when leaving, pull when coming back
+document.addEventListener('visibilitychange', () => { if (gacc) sync(); }); // push when leaving, pull when coming back
 
-$('#tokenSave').onclick = () => {
-  const t = $('#token').value.trim();
-  if (!t) return;
-  gist = { token: t, id: null };
-  store.set(K.gist, gist);
-  sync();
-};
-$('#syncNow').onclick = () => gist?.token ? sync() : syncStatus('', 'Сначала вставь токен и нажми «Подключить».');
-$('#tokenForget').onclick = () => {
-  if (!confirm('Отключить синхронизацию на этом устройстве? Память на этом устройстве и в Gist останется.')) return;
-  gist = null; store.del(K.gist); $('#token').value = '';
+function renderGoogleBox() {
+  $('#gNoClient').classList.toggle('hidden', !!GOOGLE_CLIENT_ID);
+  $('#gOff').classList.toggle('hidden', !GOOGLE_CLIENT_ID || !!gacc);
+  $('#gOn').classList.toggle('hidden', !gacc);
+  if (!gacc) return;
+  $('#gEmail').textContent = gacc.email || '';
+  $('#gSheet').classList.toggle('hidden', !gacc.sheetId);
+  if (gacc.sheetId) $('#gSheet').href = 'https://docs.google.com/spreadsheets/d/' + gacc.sheetId + '/edit';
+}
+
+async function connectGoogle() {
+  try {
+    syncStatus('busy', 'Вход через Google…');
+    await signIn();
+    renderGoogleBox();
+    await sync();
+  } catch (e) {
+    syncStatus(gacc ? 'auth' : 'err', 'Не получилось войти: ' + e.message);
+  }
+}
+$('#googleIn').onclick = connectGoogle;
+$('#reauthBtn').onclick = connectGoogle;
+$('#syncNow').onclick = () => sync();
+$('#googleOut').onclick = () => {
+  if (!confirm('Отключить синхронизацию на этом устройстве? Память на устройстве и таблица в Google Drive останутся.')) return;
+  try { google.accounts.oauth2.revoke(gacc.token); } catch {}
+  gacc = null; store.del(K.google);
+  renderGoogleBox();
   syncStatus('', 'Синхронизация не настроена');
 };
-$('#tokenHelpBtn').onclick = () => $('#tokenHelp').classList.toggle('hidden');
 
 /* ---------- backup ---------- */
 $('#backupSave').onclick = () => {
@@ -523,7 +631,7 @@ function fillSettings() {
   const all = Object.values(state.decisions), c = a => all.filter(d => d.a === a).length;
   $('#memStats').textContent = `Оценено: ${c('seen')} · в watchlist: ${c('wl')} · «не буду»: ${c('skip')} · исключено по экспорту Letterboxd: ${state.excluded.ids.length}`;
   $('#catInfo').textContent = CAT ? `${films.length.toLocaleString('ru')} фильмов с ${CAT.minVotes.toLocaleString('ru')}+ оценками на IMDb, обновлён ${CAT.built}` : '…';
-  if (gist?.token) $('#token').value = gist.token;
+  renderGoogleBox();
 }
 $('#settingsBtn').onclick = () => { fillSettings(); $('#settings').classList.remove('hidden'); };
 $('#settingsDone').onclick = () => $('#settings').classList.add('hidden');
@@ -573,7 +681,7 @@ $('#undo').onclick = undo;
     $('#loading').textContent = 'Не получилось загрузить каталог: ' + e.message;
     return;
   }
-  if (gist?.token) syncStatus('', 'Синхронизация подключена');
+  if (gacc) syncStatus('', 'Синхронизация подключена');
   rebuildQueue(); render();
   sync();
 })();

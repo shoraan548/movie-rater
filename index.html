@@ -28,6 +28,9 @@
   header h1 { font-size: 17px; margin: 0; flex: 1; letter-spacing: .3px; white-space: nowrap; }
   header button { padding: 6px 10px; font-size: 13px; }
   #syncDot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); display: inline-block; }
+  #reauth { width: calc(100% - 32px); max-width: 488px; margin: 4px 16px; padding: 8px 12px; border-radius: 10px;
+    background: #ff80001f; border: 1px solid var(--orange); font-size: 13px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #reauth button { padding: 6px 12px; font-size: 13px; background: var(--orange); border-color: var(--orange); color: #fff; }
   #syncDot.ok { background: var(--green); } #syncDot.busy { background: var(--orange); } #syncDot.err { background: var(--red); }
 
   main { width: 100%; max-width: 520px; flex: 1; display: flex; flex-direction: column; padding: 0 16px 16px; min-height: 0; }
@@ -99,6 +102,7 @@
   <span id="syncDot" title="Синхронизация не настроена"></span>
   <button id="settingsBtn" title="Настройки">⚙</button>
 </header>
+<div id="reauth" class="hidden">Синхронизация на паузе: Google просит войти снова. <button id="reauthBtn">Войти</button></div>
 
 <main>
   <div id="loading">Загружаю каталог фильмов…</div>
@@ -174,16 +178,16 @@
     </div>
 
     <h3>Синхронизация между устройствами</h3>
-    <p>Через приватный GitHub Gist. Нужен токен с доступом только к Gist —
-      <button class="link" id="tokenHelpBtn">как его получить</button>.</p>
-    <ol id="tokenHelp" class="hidden">
-      <li>github.com → аватар → <b>Settings</b> → <b>Developer settings</b> → <b>Personal access tokens</b> → <b>Tokens (classic)</b>.</li>
-      <li><b>Generate new token (classic)</b>. Note: «Movie Rater», Expiration: <b>No expiration</b>.</li>
-      <li>Отметь <b>только</b> галочку <b>gist</b> → <b>Generate token</b> → скопируй токен (начинается с <code>ghp_</code>).</li>
-      <li>Вставь сюда на каждом устройстве — это тот же самый токен.</li>
-    </ol>
-    <input type="password" id="token" placeholder="ghp_…" autocomplete="off">
-    <div class="row"><button id="tokenSave">Подключить</button><button id="syncNow">Синхронизировать сейчас</button><button class="link" id="tokenForget">Отключить</button></div>
+    <div id="gNoClient" class="hidden"><p>Вход через Google ещё не настроен владельцем сайта.</p></div>
+    <div id="gOff" class="hidden">
+      <p>Войди через Google — приложение создаст в твоём Google Drive таблицу «Movie Rater» и будет хранить память там.
+        Доступ только к файлам, которые создаёт само приложение, а не ко всему Drive. На другом устройстве войди тем же аккаунтом.</p>
+      <div class="row"><button class="primary" id="googleIn">Войти через Google</button></div>
+    </div>
+    <div id="gOn" class="hidden">
+      <p>Подключено: <b id="gEmail"></b> · <a id="gSheet" target="_blank" rel="noopener">открыть таблицу ↗</a></p>
+      <div class="row"><button id="syncNow">Синхронизировать сейчас</button><button class="link" id="googleOut">Отключить</button></div>
+    </div>
     <div class="msg" id="syncMsg"></div>
 
     <h3>Файлы для Letterboxd</h3>
@@ -205,6 +209,7 @@
   </div>
 </div>
 
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="app.js"></script>
 </body>
 </html>
