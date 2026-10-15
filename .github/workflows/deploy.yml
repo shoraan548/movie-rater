@@ -27,13 +27,17 @@ jobs:
 
       - name: Build site with OMDb key
         env:
-          OMDB_KEY: ${{ secrets.OMDB_KEY }}
+          # a repository secret normally; also accepted as a repository variable
+          OMDB_KEY: ${{ secrets.OMDB_KEY || vars.OMDB_KEY }}
         run: |
           mkdir -p site/data
           cp index.html site/
           cp data/catalog.json site/data/
+          OMDB_KEY="$(printf '%s' "$OMDB_KEY" | tr -d '[:space:]')"
           sed "s|__OMDB_KEY__|${OMDB_KEY}|" app.js > site/app.js
-          if [ -z "$OMDB_KEY" ]; then echo "::warning::Secret OMDB_KEY is not set — posters will come from Wikipedia only"; fi
+          echo "OMDb key length: ${#OMDB_KEY}"
+          if [ -z "$OMDB_KEY" ]; then echo "::warning::OMDB_KEY is not set (Settings → Secrets and variables → Actions → Repository secrets) — posters will come from Wikipedia only"; fi
+          if grep -q "__OMDB_KEY__" site/app.js; then echo "::warning::OMDb key was not inserted into app.js"; fi
 
       - uses: actions/configure-pages@v5
 
