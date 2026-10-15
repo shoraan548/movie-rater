@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Movie Rater</title>
+<style>
+  :root {
+    --bg: #14181c; --panel: #1c2228; --line: #2c3440; --text: #e6edf3; --muted: #8b98a5;
+    --green: #00c030; --orange: #ff8000; --red: #e5484d; --blue: #40bcf4; --star: #00c030;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overscroll-behavior: none; }
+  body { display: flex; flex-direction: column; align-items: center; }
+  .hidden { display: none !important; }
+  button, select { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--line);
+    background: var(--panel); border-radius: 10px; padding: 10px 16px; }
+  button:hover { border-color: var(--muted); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--green); border-color: var(--green); color: #fff; font-weight: 600; }
+  button.link { background: none; border: none; color: var(--blue); padding: 4px 0; font-size: 13px; text-align: left; }
+  input[type=text], input[type=password] { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); font: inherit; }
+  a { color: var(--blue); }
+
+  header { width: 100%; max-width: 520px; padding: 12px 16px 4px; display: flex; align-items: center; gap: 8px; }
+  header h1 { font-size: 17px; margin: 0; flex: 1; letter-spacing: .3px; white-space: nowrap; }
+  header button { padding: 6px 10px; font-size: 13px; }
+  #syncDot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); display: inline-block; }
+  #syncDot.ok { background: var(--green); } #syncDot.busy { background: var(--orange); } #syncDot.err { background: var(--red); }
+
+  main { width: 100%; max-width: 520px; flex: 1; display: flex; flex-direction: column; padding: 0 16px 16px; min-height: 0; }
+
+  .stats { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin: 4px 0; gap: 8px; }
+  #filterSummary { color: var(--muted); font-size: 12px; cursor: pointer; text-decoration: underline dotted; }
+
+  /* cards */
+  #stack { position: relative; flex: 1; min-height: 320px; margin: 8px 0 12px; }
+  .card { position: absolute; inset: 0; background: var(--panel); border-radius: 18px; overflow: hidden;
+    box-shadow: 0 10px 30px #0008; display: flex; flex-direction: column; touch-action: none; user-select: none; }
+  .card.back { transform: scale(.95) translateY(10px); opacity: .6; }
+  .card.anim { transition: transform .3s ease, opacity .3s ease; }
+  .poster { flex: 1; min-height: 0; position: relative; background: #0d1014; display: flex; align-items: center; justify-content: center; }
+  .poster img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  .poster .ph { color: var(--muted); text-align: center; padding: 20px; font-size: 14px; }
+  .poster .ph.none { font-size: 18px; font-weight: 600; }
+  .poster .ph .ico { font-size: 56px; opacity: .5; margin-bottom: 6px; }
+  .meta { padding: 10px 16px 12px; }
+  .meta .t { font-size: 20px; font-weight: 700; }
+  .meta .sub { color: var(--muted); font-size: 13px; }
+  .meta a { font-size: 12px; float: right; margin-top: 4px; }
+  .label { position: absolute; padding: 6px 14px; border: 3px solid; border-radius: 10px; font-weight: 800;
+    font-size: 22px; opacity: 0; letter-spacing: 1px; background: #000a; }
+  .label.no { top: 24px; right: 20px; color: var(--red); transform: rotate(12deg); }
+  .label.yes { top: 24px; left: 20px; color: var(--green); transform: rotate(-12deg); }
+  .label.wl { bottom: 24px; left: 50%; transform: translateX(-50%); color: var(--blue); white-space: nowrap; }
+
+  .controls { display: flex; justify-content: center; gap: 16px; align-items: center; }
+  .controls button { width: 60px; height: 60px; border-radius: 50%; font-size: 24px; padding: 0; }
+  .controls .small { width: 44px; height: 44px; font-size: 17px; }
+  #no { color: var(--red); } #yes { color: var(--green); } #wl { color: var(--blue); }
+  .hint { text-align: center; color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+  .exports { display: flex; gap: 8px; margin-top: 10px; }
+  .exports button { flex: 1; font-size: 13px; padding: 8px; }
+
+  /* overlays */
+  .overlay { position: fixed; inset: 0; background: #000c; display: flex; align-items: center; justify-content: center; z-index: 10; padding: 16px; }
+  .box { background: var(--panel); border-radius: 18px; padding: 20px; width: 100%; max-width: 440px; max-height: 100%; overflow: auto; }
+  .box h2 { margin: 0 0 10px; font-size: 18px; }
+  .box h3 { margin: 18px 0 6px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .box p, .box li { font-size: 13px; color: var(--muted); }
+  .box .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 5px 10px; border-radius: 999px; font-size: 13px; }
+  .chip.on { background: var(--blue); border-color: var(--blue); color: #000; }
+  .msg { font-size: 13px; margin-top: 8px; }
+  .msg.err { color: var(--red); } .msg.ok { color: var(--green); }
+
+  #rate .box { text-align: center; }
+  #rate img { height: 170px; border-radius: 8px; }
+  #rate h2 { margin: 10px 0 2px; }
+  #stars { display: flex; justify-content: center; margin: 16px 0 6px; }
+  .star { position: relative; width: 52px; height: 52px; font-size: 52px; line-height: 52px; color: var(--line); cursor: pointer; }
+  .star .fill { position: absolute; left: 0; top: 0; overflow: hidden; color: var(--star); width: 0; white-space: nowrap; }
+  .star .h { position: absolute; top: 0; bottom: 0; width: 50%; }
+  .star .h.l { left: 0; } .star .h.r { right: 0; }
+  #rateVal { height: 22px; color: var(--muted); }
+  #rate .row { justify-content: center; }
+
+  #loading, #empty { text-align: center; color: var(--muted); margin-top: 60px; }
+  #drop.over { outline: 2px dashed var(--green); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 Movie Rater</h1>
+  <span id="syncDot" title="Синхронизация не настроена"></span>
+  <button id="settingsBtn" title="Настройки">⚙</button>
+</header>
+
+<main>
+  <div id="loading">Загружаю каталог фильмов…</div>
+
+  <section id="swipe" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0">
+    <div class="stats">
+      <span id="filterSummary" title="Фильтры"></span>
+      <span id="tally"></span>
+    </div>
+    <div id="stack"></div>
+    <div class="controls">
+      <button id="no" title="Не смотрел и не буду (←)">✕</button>
+      <button id="undo" class="small" title="Отменить (Backspace)">↶</button>
+      <button id="wl" class="small" title="В watchlist (↑)">🔖</button>
+      <button id="yes" title="Смотрел (→)">✓</button>
+    </div>
+    <div class="hint">← не буду · → смотрел · ↑ в watchlist · Backspace — отменить</div>
+    <div class="exports">
+      <button id="exportRatings"></button>
+      <button id="exportWl"></button>
+    </div>
+  </section>
+
+  <section id="empty" class="hidden">
+    <div style="font-size:48px">🎬</div>
+    <p>Под эти фильтры фильмы закончились.</p>
+    <button id="emptyFilters">Изменить фильтры</button>
+  </section>
+</main>
+
+<!-- rating -->
+<div id="rate" class="overlay hidden">
+  <div class="box">
+    <img id="rateImg" alt="">
+    <h2 id="rateTitle"></h2>
+    <div class="sub" id="rateYear" style="color:var(--muted)"></div>
+    <div id="stars"></div>
+    <div id="rateVal">&nbsp;</div>
+    <div class="row">
+      <button id="rateCancel">Назад</button>
+      <button id="rateSkip">Смотрел, без оценки</button>
+    </div>
+    <p>Клик по половине звезды = ½ · клавиши 1…9, 0 = ½…5★ · Enter = без оценки · Esc = назад</p>
+  </div>
+</div>
+
+<!-- filters -->
+<div id="filters" class="overlay hidden">
+  <div class="box">
+    <h2>Какие фильмы показывать</h2>
+    <h3>Жанры (любой из выбранных)</h3>
+    <div class="chips" id="genreChips"></div>
+    <h3>Десятилетие</h3>
+    <select id="decade"></select>
+    <h3>Рейтинг IMDb не ниже</h3>
+    <select id="minRating"></select>
+    <p>Внутри фильтра порядок всегда «сначала самые известные».</p>
+    <div class="row"><button class="primary" id="filtersDone">Готово</button><button id="filtersReset">Сбросить</button></div>
+  </div>
+</div>
+
+<!-- settings -->
+<div id="settings" class="overlay hidden">
+  <div class="box">
+    <h2>Настройки</h2>
+
+    <h3>Твой экспорт Letterboxd</h3>
+    <div id="drop">
+      <p>Кинь ZIP-экспорт (letterboxd.com → Settings → Data → Export your data) — просмотренное и то, что уже в watchlist, перестанет предлагаться.</p>
+      <button id="zipBtn">Выбрать ZIP…</button>
+      <input id="zipFile" type="file" accept=".zip,application/zip" hidden>
+      <div class="msg" id="zipMsg"></div>
+    </div>
+
+    <h3>Синхронизация между устройствами</h3>
+    <p>Через приватный GitHub Gist. Нужен токен с доступом только к Gist —
+      <button class="link" id="tokenHelpBtn">как его получить</button>.</p>
+    <ol id="tokenHelp" class="hidden">
+      <li>github.com → аватар → <b>Settings</b> → <b>Developer settings</b> → <b>Personal access tokens</b> → <b>Tokens (classic)</b>.</li>
+      <li><b>Generate new token (classic)</b>. Note: «Movie Rater», Expiration: <b>No expiration</b>.</li>
+      <li>Отметь <b>только</b> галочку <b>gist</b> → <b>Generate token</b> → скопируй токен (начинается с <code>ghp_</code>).</li>
+      <li>Вставь сюда на каждом устройстве — это тот же самый токен.</li>
+    </ol>
+    <input type="password" id="token" placeholder="ghp_…" autocomplete="off">
+    <div class="row"><button id="tokenSave">Подключить</button><button id="syncNow">Синхронизировать сейчас</button><button class="link" id="tokenForget">Отключить</button></div>
+    <div class="msg" id="syncMsg"></div>
+
+    <h3>Файлы для Letterboxd</h3>
+    <p>Скачивается только то, что добавилось после прошлого скачивания.</p>
+    <div class="row"><button class="link" id="exportRatingsAll">Скачать все оценки за всё время</button></div>
+    <div class="row"><button class="link" id="exportWlAll">Скачать весь watchlist за всё время</button></div>
+
+    <h3>Память</h3>
+    <p id="memStats"></p>
+    <div class="row">
+      <button id="backupSave">💾 Сохранить в файл</button>
+      <button id="backupLoad">Восстановить из файла</button>
+      <input id="backupFile" type="file" accept=".json,application/json" hidden>
+    </div>
+    <div class="row"><button class="link" id="forgetSkips">Снова показывать фильмы, отмеченные «не буду»</button></div>
+
+    <p style="margin-top:18px">Каталог: <span id="catInfo"></span>. Постеры — OMDb, запасной вариант — Википедия.</p>
+    <div class="row"><button class="primary" id="settingsDone">Закрыть</button></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
