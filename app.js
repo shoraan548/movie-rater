@@ -411,7 +411,7 @@ drop.addEventListener('drop', e => e.dataTransfer.files[0] && loadZip(e.dataTran
 /* ---------- Google sync: a spreadsheet in your own Google Drive ----------
    Sign-in is Google Identity Services' token flow (no server). Scope drive.file = only files this app created. */
 // OAuth client ID from Google Cloud Console → APIs & Services → Credentials. Public by design, not a secret.
-const GOOGLE_CLIENT_ID = '542740006083-12em0ij0t5bfg6b0so1lraqltdqipiev.apps.googleusercontent.com';
+const GOOGLE_CLIENT_ID = '817788103336-tma2k74ikqhg0uqmo33jasbof8lliaf6.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets/';
 const TAB_FILMS = 'Фильмы', TAB_EXCL = 'Исключено';
