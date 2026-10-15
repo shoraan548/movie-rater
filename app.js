@@ -200,7 +200,7 @@ function flyOut(a) {
       el.style.transform = a === 'wl' ? 'translateY(-700px)' : `translateX(${a === 'seen' ? 600 : -600}px) rotate(${a === 'seen' ? 30 : -30}deg)`;
       el.style.opacity = 0;
     });
-    setTimeout(res, 250);
+    setTimeout(() => { el.style.display = 'none'; res(); }, 250); // out of the layout, even while the rating dialog is open
   });
 }
 

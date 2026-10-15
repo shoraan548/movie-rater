@@ -11,8 +11,9 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overscroll-behavior: none; }
-  body { display: flex; flex-direction: column; align-items: center; }
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overscroll-behavior: none;
+    overflow: hidden; } /* a card flying off-screen must not make the page wider: mobile browsers would shift the view */
+  body { display: flex; flex-direction: column; align-items: center; height: 100dvh; }
   .hidden { display: none !important; }
   button, select { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--line);
     background: var(--panel); border-radius: 10px; padding: 10px 16px; }
@@ -69,8 +70,8 @@
   .exports button { flex: 1; font-size: 13px; padding: 8px; }
 
   /* overlays */
-  .overlay { position: fixed; inset: 0; background: #000c; display: flex; align-items: center; justify-content: center; z-index: 10; padding: 16px; }
-  .box { background: var(--panel); border-radius: 18px; padding: 20px; width: 100%; max-width: 440px; max-height: 100%; overflow: auto; }
+  .overlay { position: fixed; inset: 0; height: 100dvh; background: #000c; display: flex; align-items: center; justify-content: center; z-index: 10; padding: 16px; }
+  .box { background: var(--panel); border-radius: 18px; padding: 20px; width: 100%; max-width: 440px; max-height: 100%; overflow: auto; overscroll-behavior: contain; }
   .box h2 { margin: 0 0 10px; font-size: 18px; }
   .box h3 { margin: 18px 0 6px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
   .box p, .box li { font-size: 13px; color: var(--muted); }
@@ -82,7 +83,8 @@
   .msg.err { color: var(--red); } .msg.ok { color: var(--green); }
 
   #rate .box { text-align: center; }
-  #rate img { height: 170px; border-radius: 8px; }
+  #rate img { height: min(170px, 25dvh); border-radius: 8px; }
+  @media (max-width: 360px) { .star { width: 46px; height: 46px; font-size: 46px; line-height: 46px; } }
   #rate h2 { margin: 10px 0 2px; }
   #stars { display: flex; justify-content: center; margin: 16px 0 6px; }
   .star { position: relative; width: 52px; height: 52px; font-size: 52px; line-height: 52px; color: var(--line); cursor: pointer; }
